@@ -162,7 +162,15 @@ class APIIngress:
                         })
                     }
 
-        return EventSourceResponse(event_generator())
+        return EventSourceResponse(
+            event_generator(),
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Important for nginx
+            },
+            media_type="text/event-stream"
+        )
 
     @app.get(
         "/health",
