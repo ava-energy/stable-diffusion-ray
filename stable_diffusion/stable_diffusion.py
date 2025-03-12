@@ -1,7 +1,7 @@
 from io import BytesIO
 from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 import torch
 from ray import serve
 import ray
@@ -10,9 +10,10 @@ import asyncio
 from typing import List, Dict
 import uuid
 import json
-import base64
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
+import tempfile
+from pathlib import Path
 
 class BatchRequest(BaseModel):
     prompts: List[str]
@@ -26,6 +27,8 @@ class APIIngress:
     def __init__(self, diffusion_model_handle) -> None:
         self.handle = diffusion_model_handle
         self.batch_progress: Dict[str, asyncio.Queue] = {}
+        self.temp_dir = Path(tempfile.gettempdir()) / "stable-diffusion-batches"
+        self.temp_dir.mkdir(exist_ok=True)
 
     @app.get(
         "/imagine",
@@ -58,7 +61,7 @@ class APIIngress:
             headers=headers,
         )
 
-    @app.post("/imagine/batch")
+    @app.post("/imagine/batches")
     async def start_batch_generation(self, request: BatchRequest):
         batch_id = str(uuid.uuid4())
         # Create queue for this batch
@@ -90,31 +93,40 @@ class APIIngress:
 
     async def _generate_and_notify(self, batch_id: str, index: int, prompt: str, img_size: int):
         try:
-            # Generate single image
+            # Generate image
             image = await self.handle.generate.remote(prompt, img_size=img_size)
             
-            # Convert to bytes
-            image_bytes = self._image_to_bytes(image)
+            # Save to temp file
+            image_path = self._get_image_path(batch_id, index)
+            image.save(image_path, "PNG")
             
-            # Put result in queue for SSE
+            # Send only the image metadata through SSE
             await self.batch_progress[batch_id].put({
                 "index": index,
                 "prompt": prompt,
-                "image": image_bytes
+                "status": "complete",
+                "image_url": f"/imagine/batches/{batch_id}/images/{index}"
             })
             
         except Exception as e:
-            # Handle errors
             await self.batch_progress[batch_id].put({
                 "index": index,
                 "prompt": prompt,
+                "status": "error",
                 "error": str(e)
             })
 
-    @app.get("/imagine/batch/{batch_id}")
+    @app.get("/imagine/batches/{batch_id}/images/{index}")
+    async def get_image(self, batch_id: str, index: int):
+        image_path = self._get_image_path(batch_id, index)
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail="Image not found")
+        return FileResponse(image_path, media_type="image/png")
+
+    @app.get("/imagine/batches/{batch_id}")
     async def batch_progress_endpoint(self, batch_id: str, request: Request):
         if batch_id not in self.batch_progress:
-            raise HTTPException(status_code=404, detail=f"Batch \"{batch_id}\" not found")
+            raise HTTPException(status_code=404, detail="Batch \"{batch_id}\" not found")
 
         async def event_generator():
             queue = self.batch_progress[batch_id]
@@ -135,7 +147,8 @@ class APIIngress:
                         "data": json.dumps({
                             "index": result["index"],
                             "prompt": result["prompt"],
-                            "error": result["error"]
+                            "status": result["status"],
+                            "error": result["error"],
                         })
                     }
                 else:
@@ -144,17 +157,12 @@ class APIIngress:
                         "data": json.dumps({
                             "index": result["index"],
                             "prompt": result["prompt"],
-                            "image": base64.b64encode(result["image"]).decode()
+                            "status": result["status"],
+                            "image_url": result["image_url"],
                         })
                     }
 
         return EventSourceResponse(event_generator())
-
-    def _image_to_bytes(self, image) -> bytes:
-        file_stream = BytesIO()
-        image.save(file_stream, "PNG")
-        file_stream.seek(0)
-        return file_stream.getvalue()
 
     @app.get(
         "/health",
@@ -165,6 +173,9 @@ class APIIngress:
             content="OK",
             media_type="text/plain",
         )
+
+    def _get_image_path(self, batch_id: str, index: int) -> Path:
+        return self.temp_dir / f"{batch_id}_{index}.png"
 
 
 @serve.deployment(ray_actor_options={"num_gpus": 1},)
