@@ -15,49 +15,14 @@ from pydantic import BaseModel
 import tempfile
 from pathlib import Path
 from google.cloud import pubsub_v1
-
-
-project_id = "studied-theater-402100"
-topic_id = "compute-tasks"
-publisher = pubsub_v1.PublisherClient()
-topic_path = publisher.topic_path(project_id, topic_id)
-
-compute_requester_id = "98f71bd-7cb6-4439-ba4b-b35802b4d86b"
-
-async def publish_compute_task(task_id: str, nodes: List[str]):
-    if len(nodes) == 0:
-        return
-
-    task = {
-        "event_name": "TaskCompleted",
-        "task": {
-            "task_id": task_id,
-            "task_type": "ImageGeneration",
-        },
-        "requester": {
-            "user_id": compute_requester_id,
-        },
-        "executors": [
-            {
-                "user_id": node,
-                "cost": {
-                    "amount": 1,
-                    "currency": "USD",
-                }
-            }
-            for node in nodes
-        ]
-    }
-
-    # Publish and await result
-    future = publisher.publish(topic_path, json.dumps(task).encode("utf-8"))
-    message_id = await asyncio.wrap_future(future)  # Convert to async
-    print(f"✅ Published message ID: {message_id}")
+from google.oauth2 import service_account
+import os
 
 
 class BatchRequest(BaseModel):
     prompts: List[str]
     img_size: int = 512  # Default value
+
 
 app = FastAPI()
 
@@ -65,6 +30,13 @@ app = FastAPI()
 @serve.ingress(app)
 class APIIngress:
     def __init__(self, diffusion_model_handle) -> None:
+        project_id = "studied-theater-402100"
+        topic_id = "compute-tasks"
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/var/secrets/gcp/ray-k8s-sa-key.json")
+        self.credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        self.publisher = pubsub_v1.PublisherClient(credentials=self.credentials)
+        self.topic_path = self.publisher.topic_path(project_id, topic_id)
+
         self.handle = diffusion_model_handle
         self.batch_progress: Dict[str, asyncio.Queue] = {}
         self.temp_dir = Path(tempfile.gettempdir()) / "stable-diffusion-batches"
@@ -127,7 +99,7 @@ class APIIngress:
             nodes = await asyncio.gather(*tasks)
             
             # Publish final completion event to PubSub
-            await publish_compute_task(batch_id, [n for n in nodes if n is not None])
+            await self.publish_compute_task(batch_id, [n for n in nodes if n is not None])
         finally:
             # Cleanup
             await self.batch_progress[batch_id].put(None)  # Signal completion
@@ -235,6 +207,38 @@ class APIIngress:
 
     def _get_image_path(self, batch_id: str, index: int) -> Path:
         return self.temp_dir / f"{batch_id}_{index}.png"
+
+    async def publish_compute_task(self, task_id: str, nodes: List[str]):
+        compute_requester_id = "98f71bd-7cb6-4439-ba4b-b35802b4d86b"
+
+        if len(nodes) == 0:
+            return
+
+        task = {
+            "event_name": "TaskCompleted",
+            "task": {
+                "task_id": task_id,
+                "task_type": "ImageGeneration",
+            },
+            "requester": {
+                "user_id": compute_requester_id,
+            },
+            "executors": [
+                {
+                    "user_id": node,
+                    "cost": {
+                        "amount": 1,
+                        "currency": "USD",
+                    }
+                }
+                for node in nodes
+            ]
+        }
+
+        # Publish and await result
+        future = self.publisher.publish(self.topic_path, json.dumps(task).encode("utf-8"))
+        message_id = await asyncio.wrap_future(future)  # Convert to async
+        print(f"✅ Published message ID: {message_id}")
 
 
 @serve.deployment(ray_actor_options={"num_gpus": 1},)
