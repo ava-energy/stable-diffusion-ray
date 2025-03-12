@@ -7,13 +7,49 @@ from ray import serve
 import ray
 
 import asyncio
-from typing import List, Dict
+from typing import List, Dict, Optional
 import uuid
 import json
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 import tempfile
 from pathlib import Path
+from google.cloud import pubsub_v1
+
+
+project_id = "studied-theater-402100"
+topic_id = "compute-tasks"
+publisher = pubsub_v1.PublisherClient()
+topic_path = publisher.topic_path(project_id, topic_id)
+
+compute_requester_id = "98f71bd-7cb6-4439-ba4b-b35802b4d86b"
+
+def publish_compute_task(task_id: str, nodes: List[str]):
+    if len(nodes) == 0:
+        return
+
+    task = {
+        "event_name": "TaskCompleted",
+        "task": {
+            "task_id": task_id,
+            "task_type": "ImageGeneration",
+        },
+        "requester": {
+            "user_id": compute_requester_id,
+        },
+        "executors": [
+            {
+                "user_id": node,
+                "cost": {
+                    "amount": 1,
+                    "currency": "USD",
+                }
+            }
+            for node in nodes
+        ]
+    }
+    publisher.publish(topic_path, json.dumps(task).encode("utf-8"))
+
 
 class BatchRequest(BaseModel):
     prompts: List[str]
@@ -45,7 +81,8 @@ class APIIngress:
         }
 
         # Generate image
-        image = await self.handle.generate.remote(prompt, img_size=img_size)
+        result = await self.handle.generate.remote(prompt, img_size=img_size)
+        image = result["image"]
         file_stream = BytesIO()
         image.save(file_stream, "PNG")
         file_stream.seek(0)
@@ -83,18 +120,20 @@ class APIIngress:
             ]
             
             # Wait for all generations to complete
-            await asyncio.gather(*tasks)
+            nodes = await asyncio.gather(*tasks)
             
             # Publish final completion event to PubSub
+            publish_compute_task(batch_id, [n for n in nodes if n is not None])
         finally:
             # Cleanup
             await self.batch_progress[batch_id].put(None)  # Signal completion
             del self.batch_progress[batch_id]
 
-    async def _generate_and_notify(self, batch_id: str, index: int, prompt: str, img_size: int):
+    async def _generate_and_notify(self, batch_id: str, index: int, prompt: str, img_size: int) -> Optional[str]:
         try:
             # Generate image
-            image = await self.handle.generate.remote(prompt, img_size=img_size)
+            result = await self.handle.generate.remote(prompt, img_size=img_size)
+            image = result["image"]
             
             # Save to temp file
             image_path = self._get_image_path(batch_id, index)
@@ -107,6 +146,8 @@ class APIIngress:
                 "status": "complete",
                 "image_url": f"/imagine/batches/{batch_id}/images/{index}"
             })
+
+            return result["node_id"]
             
         except Exception as e:
             await self.batch_progress[batch_id].put({
@@ -211,9 +252,14 @@ class StableDiffusionV2:
     def generate(self, prompt: str, img_size: int = 512):
         assert len(prompt), "prompt parameter cannot be empty"
 
+        # Get node information
+        runtime_context = ray.get_runtime_context()
+        node_id = runtime_context.node_id
+
         with torch.autocast("cuda"):
             image = self.pipe(prompt, height=img_size, width=img_size).images[0]
-            return image
+
+        return {"image": image, "node_id": node_id}
 
 
 entrypoint = APIIngress.bind(StableDiffusionV2.bind())
