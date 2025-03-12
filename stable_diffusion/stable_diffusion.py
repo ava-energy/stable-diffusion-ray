@@ -44,6 +44,15 @@ class APIIngress:
             headers=headers,
         )
 
+    @app.get(
+        "/health",
+        response_class=Response,
+    )
+    async def health(self):
+        return Response(
+            content="OK",
+            media_type="text/plain",
+        )
 
 @serve.deployment(ray_actor_options={"num_gpus": 1},)
 class StableDiffusionV2:
