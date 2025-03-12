@@ -24,7 +24,7 @@ topic_path = publisher.topic_path(project_id, topic_id)
 
 compute_requester_id = "98f71bd-7cb6-4439-ba4b-b35802b4d86b"
 
-def publish_compute_task(task_id: str, nodes: List[str]):
+async def publish_compute_task(task_id: str, nodes: List[str]):
     if len(nodes) == 0:
         return
 
@@ -48,7 +48,11 @@ def publish_compute_task(task_id: str, nodes: List[str]):
             for node in nodes
         ]
     }
-    publisher.publish(topic_path, json.dumps(task).encode("utf-8"))
+
+    # Publish and await result
+    future = publisher.publish(topic_path, json.dumps(task).encode("utf-8"))
+    message_id = await asyncio.wrap_future(future)  # Convert to async
+    print(f"✅ Published message ID: {message_id}")
 
 
 class BatchRequest(BaseModel):
@@ -123,7 +127,7 @@ class APIIngress:
             nodes = await asyncio.gather(*tasks)
             
             # Publish final completion event to PubSub
-            publish_compute_task(batch_id, [n for n in nodes if n is not None])
+            await publish_compute_task(batch_id, [n for n in nodes if n is not None])
         finally:
             # Cleanup
             await self.batch_progress[batch_id].put(None)  # Signal completion
