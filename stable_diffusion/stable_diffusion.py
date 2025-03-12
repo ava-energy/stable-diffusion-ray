@@ -114,7 +114,7 @@ class APIIngress:
     @app.get("/imagine/batch/{batch_id}")
     async def batch_progress_endpoint(self, batch_id: str, request: Request):
         if batch_id not in self.batch_progress:
-            raise HTTPException(status_code=404, detail="Batch not found")
+            raise HTTPException(status_code=404, detail=f"Batch \"{batch_id}\" not found")
 
         async def event_generator():
             queue = self.batch_progress[batch_id]
