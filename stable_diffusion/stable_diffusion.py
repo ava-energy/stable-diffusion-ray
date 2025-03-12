@@ -138,6 +138,12 @@ class APIIngress:
                 # Get next result
                 result = await queue.get()
                 if result is None:  # End signal
+                    yield {
+                        "event": "complete",
+                        "data": json.dumps({
+                            "status": "complete",
+                        })
+                    }
                     break
 
                 # Send event
