@@ -30,13 +30,6 @@ app = FastAPI()
 @serve.ingress(app)
 class APIIngress:
     def __init__(self, diffusion_model_handle) -> None:
-        project_id = "studied-theater-402100"
-        topic_id = "compute-tasks"
-        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/var/secrets/gcp/ray-k8s-sa-key.json")
-        self.credentials = service_account.Credentials.from_service_account_file(credentials_path)
-        self.publisher = pubsub_v1.PublisherClient(credentials=self.credentials)
-        self.topic_path = self.publisher.topic_path(project_id, topic_id)
-
         self.handle = diffusion_model_handle
         self.batch_progress: Dict[str, asyncio.Queue] = {}
         self.temp_dir = Path(tempfile.gettempdir()) / "stable-diffusion-batches"
@@ -236,9 +229,25 @@ class APIIngress:
         }
 
         # Publish and await result
-        future = self.publisher.publish(self.topic_path, json.dumps(task).encode("utf-8"))
+        future = self.publisher().publish(self.topic_path(), json.dumps(task).encode("utf-8"))
         message_id = await asyncio.wrap_future(future)  # Convert to async
         print(f"✅ Published message ID: {message_id}")
+
+    def publisher(self):
+        if self._publisher is None:
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "/var/secrets/gcp/ray-k8s-sa-key.json")
+            self._credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            self._publisher = pubsub_v1.PublisherClient(credentials=self._credentials)
+
+        return self._publisher
+
+    def topic_path(self):
+        if self._topic_path is None:
+            project_id = "studied-theater-402100"
+            topic_id = "compute-tasks"
+            self._topic_path = self._publisher.topic_path(project_id, topic_id)
+
+        return self._topic_path
 
 
 @serve.deployment(ray_actor_options={"num_gpus": 1},)
