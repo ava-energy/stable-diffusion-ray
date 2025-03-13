@@ -274,7 +274,7 @@ class StableDiffusionV2:
 
         # Get node information
         runtime_context = ray.get_runtime_context()
-        node_id = runtime_context.node_id
+        node_id = str(runtime_context.node_id)
 
         with torch.autocast("cuda"):
             image = self.pipe(prompt, height=img_size, width=img_size).images[0]
