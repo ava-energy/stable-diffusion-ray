@@ -35,6 +35,9 @@ class APIIngress:
         self.temp_dir = Path(tempfile.gettempdir()) / "stable-diffusion-batches"
         self.temp_dir.mkdir(exist_ok=True)
 
+        self._publisher = None
+        self._topic_path = None
+
     @app.get(
         "/imagine",
         responses={200: {"content": {"image/png": {}}}},
@@ -245,7 +248,7 @@ class APIIngress:
         if self._topic_path is None:
             project_id = "studied-theater-402100"
             topic_id = "compute-tasks"
-            self._topic_path = self._publisher.topic_path(project_id, topic_id)
+            self._topic_path = self.publisher().topic_path(project_id, topic_id)
 
         return self._topic_path
 
